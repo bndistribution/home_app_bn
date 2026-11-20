@@ -671,9 +671,7 @@ footer.left{flex-direction:row-reverse}
     }
   }
 
-  function save() {
-    if (!dirty) return;
-    if (!cap) { toast('Halaman ini hanya bisa disimpan oleh pemilik.'); return; }
+  function buildHtml() {
     var clone = document.documentElement.cloneNode(true);
     clone.removeAttribute('data-theme'); clone.removeAttribute('style');
     Array.prototype.slice.call(clone.querySelectorAll('head > *, body > *')).forEach(function (n) {
@@ -682,7 +680,60 @@ footer.left{flex-direction:row-reverse}
     var a = clone.querySelector('#app');
     a.innerHTML = ''; a.removeAttribute('style'); a.removeAttribute('class');
     clone.querySelector('#state').textContent = JSON.stringify(state).replace(/</g, '\\u003c');
-    var html = '<!DOCTYPE html>\n' + clone.outerHTML;
+    return '<!DOCTYPE html>\n' + clone.outerHTML;
+  }
+  function ghGet() { try { return JSON.parse(localStorage.getItem('bn-gh') || 'null'); } catch (e) { return null; } }
+  function ghGuess() {
+    var h = location.hostname, p = location.pathname.split('/').filter(Boolean), r = { repo: '', branch: 'main', path: 'index.html', token: '' };
+    if (/\.github\.io$/.test(h)) r.repo = h.split('.')[0] + '/' + (p[0] && !/\.html?$/.test(p[0]) ? p[0] : h);
+    return r;
+  }
+  function ghB64(str) {
+    var bytes = new TextEncoder().encode(str), s = '', i;
+    for (i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return btoa(s);
+  }
+  function ghCommit(c) {
+    var html = buildHtml(), base = 'https://api.github.com/repos/' + c.repo + '/contents/' + c.path.split('/').map(encodeURIComponent).join('/');
+    var hd = { 'Authorization': 'Bearer ' + c.token, 'Accept': 'application/vnd.github+json' };
+    return fetch(base + '?ref=' + encodeURIComponent(c.branch), { headers: hd }).then(function (r) {
+      if (r.status === 401) throw new Error('Token GitHub salah atau kedaluwarsa.');
+      if (r.status === 404) throw new Error('Repo, branch, atau file tidak ditemukan. Cek isiannya.');
+      if (!r.ok) throw new Error('GitHub menolak (kode ' + r.status + ').');
+      return r.json();
+    }).then(function (cur) {
+      return fetch(base, { method: 'PUT', headers: hd, body: JSON.stringify({ message: 'Update link hub', content: ghB64(html), sha: cur.sha, branch: c.branch }) });
+    }).then(function (r) {
+      if (r.status === 403) throw new Error('Token tidak punya izin menulis (butuh Contents: Read and write).');
+      if (r.status === 409 || r.status === 422) throw new Error('File baru saja berubah di GitHub. Muat ulang halaman lalu coba lagi.');
+      if (!r.ok) throw new Error('Gagal menyimpan ke GitHub (kode ' + r.status + ').');
+      saved = JSON.stringify(state); dirty = false; renderBar(); toast('Tersimpan ke GitHub. Tayang beberapa saat lagi.');
+    });
+  }
+  function ghSave() {
+    var c = ghGet();
+    if (c && c.token && c.repo) {
+      toast('Menyimpan ke GitHub...');
+      ghCommit(c).catch(function (e) { toast(String(e && e.message || e)); });
+      return;
+    }
+    var g = c || ghGuess();
+    openModal({ heading: 'Simpan ke GitHub', ok: 'Simpan',
+      text: 'Cukup diisi sekali di perangkat ini. Token hanya tersimpan di browser ini, tidak masuk ke file halaman.',
+      fields: [{ id: 'repo', label: 'Repo (pemilik/nama-repo)', value: g.repo, ph: 'contoh: namaku/link-bali-nusra', req: true },
+               { id: 'branch', label: 'Branch', value: g.branch || 'main', req: true },
+               { id: 'path', label: 'Nama file', value: g.path || 'index.html', req: true },
+               { id: 'token', label: 'Token GitHub (Contents: Read and write)', type: 'password', value: g.token || '', req: true }],
+      onOk: function (v) {
+        var n = { repo: v.repo.trim(), branch: v.branch.trim(), path: v.path.trim(), token: v.token.trim() };
+        if (!/^[\w.-]+\/[\w.-]+$/.test(n.repo)) return 'Repo harus berbentuk pemilik/nama-repo.';
+        return ghCommit(n).then(function () { try { localStorage.setItem('bn-gh', JSON.stringify(n)); } catch (e) {} }).catch(function (e) { return String(e && e.message || e); });
+      } });
+  }
+  function save() {
+    if (!dirty) return;
+    if (!cap) { ghSave(); return; }
+    var html = buildHtml();
     toast('Menyimpan...');
     Promise.resolve(cap.publish(html)).then(function () {
       saved = JSON.stringify(state); dirty = false; renderBar(); toast('Tersimpan');
